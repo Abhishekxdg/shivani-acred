@@ -1,0 +1,23 @@
+[Unit]
+Description=COS Agent - AI Chief of Staff & Advisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cos-agent
+ExecStart=/usr/bin/node /opt/cos-agent/dist/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/cos-agent/.env
+
+# The agent controls the VM through its own process privileges.
+# 'cos' is an unprivileged user (blast radius = what that user can touch).
+# For literal full control of the box, change both to 'root' and run:
+#   sudo chown -R root:root /opt/cos-agent
+User=cos
+Group=cos
+
+[Install]
+WantedBy=multi-user.target

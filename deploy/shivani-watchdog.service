@@ -1,0 +1,31 @@
+[Unit]
+Description=Shivani Watchdog - supervises the COS agent with self-deploy + auto-rollback
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cos-agent
+# The watchdog launches and supervises dist/index.js. It performs Shivani's
+# self-deploys (rebuild + restart) and auto-rolls-back if a new version fails to
+# come up.
+ExecStart=/usr/bin/node /opt/cos-agent/dist/evolve/watchdog.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/cos-agent/.env
+
+# In production enable THIS unit instead of cos-agent.service — the watchdog is
+# the process that launches the agent. Do NOT enable both, or two agent
+# processes will run against the same WhatsApp session and database.
+#
+# The watchdog needs write access to the repo (git commit/reset + npm build) to
+# self-deploy and roll back, so it runs as a user that owns /opt/cos-agent.
+# 'cos' is unprivileged (blast radius = what that user can touch). For literal
+# full control of the box, change both to 'root' and:
+#   sudo chown -R root:root /opt/cos-agent
+User=cos
+Group=cos
+
+[Install]
+WantedBy=multi-user.target

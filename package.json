@@ -1,0 +1,44 @@
+{
+  "name": "cos-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI Chief of Staff + Chief Advisor. OpenRouter brain, WhatsApp (Baileys) interface, full GCP Ubuntu VM control.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@notionhq/client": "^2.2.15",
+    "@supabase/supabase-js": "^2.48.1",
+    "@whiskeysockets/baileys": "^6.7.9",
+    "better-sqlite3": "^11.8.1",
+    "docx": "^9.5.1",
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "node-cron": "^3.0.3",
+    "openai": "^4.77.0",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.10",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
