@@ -8,11 +8,11 @@
 # USAGE (on the VM, as a sudo-capable user):
 #
 #   Public repo:
-#     curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | sudo -E bash
+#     curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh | sudo -E bash
 #
 #   Private repo (needs a GitHub token with 'repo' read access):
 #     curl -fsSL -H "Authorization: token $GHT" \
-#       https://raw.githubusercontent.com/OWNER/REPO/main/install.sh \
+#       https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh \
 #       | sudo -E env GITHUB_TOKEN="$GHT" bash
 #
 # Pass config via env to run unattended, e.g.:
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 # ---- config (override via env) --------------------------------------------
-REPO_URL="${REPO_URL:-https://github.com/__OWNER__/__REPO__.git}"
+REPO_URL="${REPO_URL:-https://github.com/Abhishekxdg/shivani-acred.git}"
 BRANCH="${BRANCH:-main}"
 APP_DIR="${APP_DIR:-/opt/cos-agent}"
 RUN_USER="${RUN_USER:-cos}"
