@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 const schema = z.object({
   OPENROUTER_API_KEY: z.string().min(1, 'OPENROUTER_API_KEY is required'),
-  OPENROUTER_MODEL: z.string().default('anthropic/claude-sonnet-4.5'),
+  OPENROUTER_MODEL: z.string().default('openrouter/free'),
   OPENROUTER_BASE_URL: z.string().url().default('https://openrouter.ai/api/v1'),
 
   // The controlling number(s). Only these may command the agent.
