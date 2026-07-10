@@ -36,8 +36,7 @@ die()  { printf '\n%s✗ %s%s\n' "$R" "$*" "$N" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
 node_major() { node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
-have_node20() { command -v node >/dev/null 2>&1 && [ "$(node_major)" -ge 20 ] 2>/dev/null; }
-have_pkg() { dpkg -s "$1" >/dev/null 2>&1; }
+have_node() { command -v node >/dev/null 2>&1 && [ "$(node_major)" -ge 22 ] 2>/dev/null; }
 
 printf '%s\n' "${B}================ Shivani installer ================${N}"
 printf '%s\n' "Target: ${APP_DIR}  ·  Ubuntu $(lsb_release -rs 2>/dev/null || echo '?') ($(lsb_release -cs 2>/dev/null || echo '?'))"
@@ -46,9 +45,9 @@ printf '%s\n' "Target: ${APP_DIR}  ·  Ubuntu $(lsb_release -rs 2>/dev/null || e
 step "1/9  Checking what's already installed"
 NEED_BASE=0; NEED_NODE=0; NEED_PG=0; NEED_CHROME=0
 command -v git >/dev/null && command -v gcc >/dev/null && ok "build tools + git" || { miss "build tools + git — will install"; NEED_BASE=1; }
-have_node20 && ok "Node $(node -v)" || { miss "Node >= 20 — will install"; NEED_NODE=1; }
+have_node && ok "Node $(node -v)" || { miss "Node >= 22 — will install"; NEED_NODE=1; }
 command -v psql >/dev/null && ok "PostgreSQL $(psql --version 2>/dev/null | grep -oE '[0-9]+' | head -1)" || { miss "PostgreSQL — will install"; NEED_PG=1; }
-have_pkg libnss3 && ok "Chromium runtime libs" || { miss "Chromium libs — will install"; NEED_CHROME=1; }
+command -v google-chrome-stable >/dev/null && ok "Google Chrome" || { miss "Google Chrome — will install"; NEED_CHROME=1; }
 [ -d "$APP_DIR/.git" ] && ok "existing checkout at $APP_DIR (will update)" || miss "code — will clone into $APP_DIR"
 
 # ---- collect the OpenRouter key up front (prompted on the terminal) --------
@@ -82,29 +81,30 @@ fi
 # ---- 3. Node.js >= 20 ------------------------------------------------------
 step "3/9  Node.js"
 if [ "$NEED_NODE" = 1 ]; then
-  add "installing Node.js 20 via NodeSource…"
-  curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1 || true
+  add "installing Node.js 22 via NodeSource…"
+  curl -fsSL https://deb.nodesource.com/setup_22.x 2>/dev/null | bash - >/dev/null 2>&1 || true
   apt-get install -y nodejs >/dev/null 2>&1 || true
-  have_node20 || { add "NodeSource unavailable — using distro Node.js…"; apt-get install -y nodejs npm >/dev/null 2>&1 || true; }
-  have_node20 || die "could not install Node.js >= 20"
+  have_node || { add "NodeSource unavailable — using distro Node.js…"; apt-get install -y nodejs npm >/dev/null 2>&1 || true; }
+  have_node || die "could not install Node.js >= 22 (puppeteer + supabase require it)"
 fi
 ok "Node $(node -v), npm $(npm -v 2>/dev/null || echo '?')"
 
 # ---- 4. Chromium runtime libraries (headless-browser web search) ----------
-step "4/9  Chromium libraries (for real web browsing)"
-if [ "$NEED_CHROME" = 1 ]; then
-  DEPS="ca-certificates fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libcairo2 \
-libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 \
-libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
-libxfixes3 libxkbcommon0 libxrandr2 xdg-utils"
-  add "installing Chromium runtime libraries…"
-  apt-get install -y $DEPS libasound2t64 >/dev/null 2>&1 \
-    || apt-get install -y $DEPS libasound2 >/dev/null 2>&1 \
-    || apt-get install -y $DEPS >/dev/null 2>&1 || true
-  ok "Chromium libraries installed"
+step "4/9  Google Chrome (for real web browsing)"
+if command -v google-chrome-stable >/dev/null 2>&1; then
+  ok "Google Chrome already present"
 else
-  ok "already present"
+  add "installing Google Chrome stable (brings its own libraries)…"
+  _deb=/tmp/google-chrome.deb
+  if curl -fsSL -o "$_deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null \
+     && apt-get install -y "$_deb" >/dev/null 2>&1; then
+    ok "Google Chrome installed"
+  else
+    warn "Chrome .deb install failed — web browsing may be unavailable (continuing)"
+  fi
+  rm -f "$_deb"
 fi
+CHROME_BIN="$(command -v google-chrome-stable || echo /usr/bin/google-chrome-stable)"
 
 # ---- 5. PostgreSQL + pgvector (version-adaptive) --------------------------
 step "5/9  PostgreSQL + pgvector"
@@ -176,7 +176,10 @@ ok "code at $APP_DIR ($(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null))"
 # ---- 7. build --------------------------------------------------------------
 step "7/9  Installing dependencies + building (downloads Chromium ~150MB)"
 cd "$APP_DIR" || die "cannot enter $APP_DIR"
-export PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer"
+# Use the system Google Chrome, not Puppeteer's bundled download (flaky on fresh
+# VMs) — skip that download entirely and clear any half-downloaded cache.
+export PUPPETEER_SKIP_DOWNLOAD=true
+rm -rf "$APP_DIR/.cache/puppeteer" 2>/dev/null || true
 NPMLOG=/tmp/shivani-npm.log
 add "installing npm dependencies…"
 if ! npm ci >"$NPMLOG" 2>&1; then
@@ -201,7 +204,7 @@ set_env() {
 }
 set_env DATABASE_URL "$DATABASE_URL"
 set_env REPO_ROOT "$APP_DIR"
-set_env PUPPETEER_CACHE_DIR "$APP_DIR/.cache/puppeteer"
+set_env PUPPETEER_EXECUTABLE_PATH "$CHROME_BIN"
 [ -n "${OPENROUTER_API_KEY:-}" ] && set_env OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
 [ -n "${OPERATOR_JIDS:-}" ] && set_env OPERATOR_JIDS "$OPERATOR_JIDS"
 id -u "$RUN_USER" >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin "$RUN_USER"
@@ -225,7 +228,7 @@ printf '  %-16s %s\n' "Operator no."  "$(getenv OPERATOR_JIDS)"
 printf '  %-16s %s\n' "Founders"      "$(getenv FOUNDERS)"
 printf '  %-16s %s\n' "Founders group" "$(getenv FOUNDERS_GROUP_JID | sed 's/^$/(not set yet)/')"
 printf '  %-16s %s\n' "Timezone"      "$(getenv TZ)"
-printf '  %-16s %s\n' "Web browsing"  "headless Chromium (no API key)"
+printf '  %-16s %s\n' "Web browsing"  "system Google Chrome (no API key)"
 printf '  %-16s %s\n' "Service user"  "$RUN_USER"
 printf '%s────────────────────────────────────────────────%s\n' "$B" "$N"
 
@@ -246,7 +249,7 @@ ExecStart=$2
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
-Environment=PUPPETEER_CACHE_DIR=$APP_DIR/.cache/puppeteer
+Environment=PUPPETEER_EXECUTABLE_PATH=$CHROME_BIN
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -273,7 +276,7 @@ else
   step "9/9  Link WhatsApp — scan the QR below (WhatsApp → Linked Devices)"
   echo "  Waiting up to 4 minutes for you to scan…"
   LINKLOG="$(mktemp)"
-  ( sudo -u "$RUN_USER" env PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer" \
+  ( sudo -u "$RUN_USER" env PUPPETEER_EXECUTABLE_PATH="$CHROME_BIN" \
       bash -c "cd '$APP_DIR' && node dist/index.js" 2>&1 | tee "$LINKLOG" ) &
   CONNECTED=0
   for _ in $(seq 1 240); do
