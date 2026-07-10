@@ -2,21 +2,16 @@
 #
 # Shivani — one-command installer for a fresh Ubuntu VM (GCP/AWS/DO/Hetzner).
 #
-# It installs Node 20, PostgreSQL 16 + pgvector, and build tools; fetches this
-# repo from GitHub; builds it; provisions the database; and writes .env.
+# Installs Node >=20, PostgreSQL + pgvector, Chromium libs, and build tools;
+# fetches this repo from GitHub; builds it; provisions the database; writes .env.
 #
-# USAGE (on the VM, as a sudo-capable user):
+# USAGE (on a fresh Ubuntu VM, as a sudo-capable user) — public repo, no token:
 #
-#   Public repo:
-#     curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh | sudo -E bash
+#   curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh \
+#     | sudo env OPENROUTER_API_KEY=sk-or-xxx bash
 #
-#   Private repo (needs a GitHub token with 'repo' read access):
-#     curl -fsSL -H "Authorization: token $GHT" \
-#       https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh \
-#       | sudo -E env GITHUB_TOKEN="$GHT" bash
-#
-# Pass config via env to run unattended, e.g.:
-#   ... | sudo -E env GITHUB_TOKEN=xxx OPENROUTER_API_KEY=sk-or-xxx OPERATOR_JIDS=9178... bash
+# You can pass more config the same way (OPERATOR_JIDS=..., etc.), or edit .env
+# after. (A private repo would also take: env GITHUB_TOKEN=xxx.)
 #
 set -euo pipefail
 
@@ -40,13 +35,20 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl ca-certificates gnupg lsb-release git build-essential python3 openssl
 
-# ---- 2. Node.js 20 ---------------------------------------------------------
-if ! command -v node >/dev/null || [[ "$(node -v | cut -c2-3)" -lt 20 ]]; then
-  say "Installing Node.js 20"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-  apt-get install -y nodejs
+# ---- 2. Node.js >= 20 ------------------------------------------------------
+node_major() { node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
+have_node20() { command -v node >/dev/null 2>&1 && [ "$(node_major)" -ge 20 ] 2>/dev/null; }
+if ! have_node20; then
+  say "Installing Node.js 20 (NodeSource)"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null || true
+  apt-get install -y nodejs 2>/dev/null || true
 fi
-say "Node $(node -v), npm $(npm -v)"
+if ! have_node20; then
+  say "NodeSource unavailable for this release — installing the distro Node.js"
+  apt-get install -y nodejs npm || true
+fi
+have_node20 || { echo "ERROR: could not install Node.js >= 20" >&2; exit 1; }
+say "Node $(node -v), npm $(npm -v 2>/dev/null || echo '?')"
 
 # ---- 2b. Chromium runtime libraries (for the headless browser web search) --
 say "Installing Chromium runtime libraries"
@@ -59,17 +61,40 @@ apt-get install -y $CHROME_DEPS libasound2t64 \
   || apt-get install -y $CHROME_DEPS libasound2 \
   || apt-get install -y $CHROME_DEPS || true
 
-# ---- 3. PostgreSQL 16 + pgvector ------------------------------------------
-say "Installing PostgreSQL 16 + pgvector"
-install -d /usr/share/postgresql-common/pgdg
-curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-  -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-  > /etc/apt/sources.list.d/pgdg.list
-apt-get update -y
-apt-get install -y postgresql-16 postgresql-contrib-16 postgresql-16-pgvector
+# ---- 3. PostgreSQL + pgvector (version-adaptive) --------------------------
+say "Installing PostgreSQL + pgvector"
+CODENAME="$(lsb_release -cs 2>/dev/null || echo '')"
+# Use the official PGDG repo only if it actually has packages for this release;
+# otherwise fall back to the distro's own PostgreSQL (works on brand-new Ubuntu).
+if [ -n "$CODENAME" ] && \
+   curl -fsI "https://apt.postgresql.org/pub/repos/apt/dists/${CODENAME}-pgdg/InRelease" >/dev/null 2>&1; then
+  say "Using PGDG repo for ${CODENAME}"
+  install -d /usr/share/postgresql-common/pgdg
+  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+  echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list
+  apt-get update -y || true
+else
+  say "No PGDG packages for '${CODENAME:-unknown}' — using the distro PostgreSQL"
+fi
+apt-get install -y postgresql postgresql-contrib
 systemctl enable --now postgresql
+
+# Detect the installed major version, then get pgvector (packaged, else source).
+PGVER="$(ls -1 /usr/lib/postgresql/ 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)"
+[ -z "$PGVER" ] && PGVER="$(pg_config --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
+say "PostgreSQL major version: ${PGVER:-unknown}"
+if ! apt-get install -y "postgresql-${PGVER}-pgvector" 2>/dev/null; then
+  say "Building pgvector from source for PG ${PGVER}"
+  apt-get install -y "postgresql-server-dev-${PGVER}" make gcc git
+  _pv="$(mktemp -d)"
+  git clone --depth 1 https://github.com/pgvector/pgvector.git "$_pv/pgvector"
+  make -C "$_pv/pgvector"
+  make -C "$_pv/pgvector" install
+  rm -rf "$_pv"
+fi
 
 say "Provisioning database $PG_DB"
 sudo -u postgres psql <<SQL
