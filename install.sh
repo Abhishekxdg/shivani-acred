@@ -177,10 +177,19 @@ ok "code at $APP_DIR ($(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null))"
 step "7/9  Installing dependencies + building (downloads Chromium ~150MB)"
 cd "$APP_DIR" || die "cannot enter $APP_DIR"
 export PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer"
-add "npm ci…"
-npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1 || die "npm install failed"
+NPMLOG=/tmp/shivani-npm.log
+add "installing npm dependencies…"
+if ! npm ci >"$NPMLOG" 2>&1; then
+  add "npm ci failed — retrying with npm install…"
+  if ! npm install >"$NPMLOG" 2>&1; then
+    printf '%s---- last 30 lines of %s ----%s\n' "$DIM" "$NPMLOG" "$N"; tail -30 "$NPMLOG"
+    die "npm install failed — full log at $NPMLOG"
+  fi
+fi
 add "building…"
-npm run build >/dev/null 2>&1 || die "build failed (run 'npm run build' in $APP_DIR to see why)"
+if ! npm run build >/tmp/shivani-build.log 2>&1; then
+  tail -30 /tmp/shivani-build.log; die "build failed — full log at /tmp/shivani-build.log"
+fi
 ok "built ($(node -e "import('./dist/agent/tools/index.js').then(m=>console.log(m.tools.length+' tools'))" 2>/dev/null || echo 'ok'))"
 
 # ---- 8. .env + ownership ---------------------------------------------------
