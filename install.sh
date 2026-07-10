@@ -48,6 +48,17 @@ if ! command -v node >/dev/null || [[ "$(node -v | cut -c2-3)" -lt 20 ]]; then
 fi
 say "Node $(node -v), npm $(npm -v)"
 
+# ---- 2b. Chromium runtime libraries (for the headless browser web search) --
+say "Installing Chromium runtime libraries"
+CHROME_DEPS="ca-certificates fonts-liberation libatk-bridge2.0-0 libatk1.0-0 \
+libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libgtk-3-0 \
+libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
+libxext6 libxfixes3 libxkbcommon0 libxrandr2 xdg-utils"
+# libasound2 was renamed to libasound2t64 on Ubuntu 24.04 — try both.
+apt-get install -y $CHROME_DEPS libasound2t64 \
+  || apt-get install -y $CHROME_DEPS libasound2 \
+  || apt-get install -y $CHROME_DEPS || true
+
 # ---- 3. PostgreSQL 16 + pgvector ------------------------------------------
 say "Installing PostgreSQL 16 + pgvector"
 install -d /usr/share/postgresql-common/pgdg
@@ -91,8 +102,10 @@ fi
 git -C "$APP_DIR" remote set-url origin "$REPO_URL"
 
 # ---- 5. build --------------------------------------------------------------
-say "Installing dependencies + building"
+say "Installing dependencies + building (this downloads Chromium)"
 cd "$APP_DIR"
+# Keep Puppeteer's Chromium inside the app dir so the service user can find it.
+export PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer"
 npm ci
 npm run build
 
@@ -111,6 +124,7 @@ set_env() { # key value  — set or replace a key in .env
 }
 set_env DATABASE_URL "$DATABASE_URL"
 set_env REPO_ROOT "$APP_DIR"
+set_env PUPPETEER_CACHE_DIR "$APP_DIR/.cache/puppeteer"
 [[ -n "${OPENROUTER_API_KEY:-}" ]] && set_env OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
 [[ -n "${OPERATOR_JIDS:-}" ]]      && set_env OPERATOR_JIDS "$OPERATOR_JIDS"
 

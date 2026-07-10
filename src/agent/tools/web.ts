@@ -8,8 +8,8 @@ export const webSearchTool: AgentTool = {
     function: {
       name: 'web_search',
       description:
-        'Search the web and get a ranked list of {title, url, snippet}. Uses a configured ' +
-        'search API when set, else a keyless DuckDuckGo fallback. Use web_read to open a result.',
+        'Search the live web with a real headless-Chromium browser (DuckDuckGo, Bing fallback) ' +
+        '— no API key needed. Returns a ranked list of {title, url, snippet}. Use web_read to open a result.',
       parameters: {
         type: 'object',
         properties: {
@@ -28,7 +28,7 @@ export const webSearchTool: AgentTool = {
     try {
       const results = await webSearch(query, limit);
       if (!results.length) {
-        return `No results for "${query}". The search backend may be unreachable; set SEARCH_API_URL + SEARCH_API_KEY for a reliable provider.`;
+        return `No results for "${query}". The browser may be unavailable — check that Chromium is installed on the VM.`;
       }
       return results
         .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
