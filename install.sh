@@ -4,11 +4,11 @@
 # Detects what's present, installs what's missing (with live status), prints the
 # full config, then links WhatsApp (QR) and leaves her running as a service.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh \
-#     | sudo env OPENROUTER_API_KEY=sk-or-xxx bash
+#   curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh | sudo bash
 #
-# Extra config can be passed the same way (OPERATOR_JIDS=..., SKIP_LINK=1, etc.)
-# or edited in /opt/cos-agent/.env afterward.
+# If you don't pass OPENROUTER_API_KEY, the installer PROMPTS you for it on the
+# terminal. You can still pass it (and other config) up front if you prefer:
+#   ... | sudo env OPENROUTER_API_KEY=sk-or-xxx OPERATOR_JIDS=9178... bash
 #
 set -uo pipefail
 
@@ -50,6 +50,22 @@ have_node20 && ok "Node $(node -v)" || { miss "Node >= 20 — will install"; NEE
 command -v psql >/dev/null && ok "PostgreSQL $(psql --version 2>/dev/null | grep -oE '[0-9]+' | head -1)" || { miss "PostgreSQL — will install"; NEED_PG=1; }
 have_pkg libnss3 && ok "Chromium runtime libs" || { miss "Chromium libs — will install"; NEED_CHROME=1; }
 [ -d "$APP_DIR/.git" ] && ok "existing checkout at $APP_DIR (will update)" || miss "code — will clone into $APP_DIR"
+
+# ---- collect the OpenRouter key up front (prompted on the terminal) --------
+is_placeholder() { case "$1" in ""|*"..."*|*"YOUR"*|*"REPLACE"*) return 0;; *) return 1;; esac; }
+if ! is_placeholder "${OPENROUTER_API_KEY:-}"; then
+  ok "OpenRouter key provided (…${OPENROUTER_API_KEY: -4})"
+elif [ -r /dev/tty ]; then
+  printf '\n%sEnter your OpenRouter API key%s (sk-or-…, or press Enter to set it later): ' "$C" "$N" > /dev/tty
+  read -rs _key < /dev/tty; printf '\n' > /dev/tty
+  if [ -n "${_key:-}" ]; then
+    OPENROUTER_API_KEY="$_key"; ok "OpenRouter key captured (…${_key: -4})"
+  else
+    warn "no key entered — add OPENROUTER_API_KEY to $APP_DIR/.env later, then restart the service"
+  fi
+else
+  warn "no terminal to prompt on — set OPENROUTER_API_KEY in $APP_DIR/.env after install"
+fi
 
 # ---- 2. base packages ------------------------------------------------------
 step "2/9  Base packages"
