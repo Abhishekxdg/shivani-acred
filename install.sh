@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 #
-# Shivani — one-command installer for a fresh Ubuntu VM (GCP/AWS/DO/Hetzner).
-#
-# Installs Node >=20, PostgreSQL + pgvector, Chromium libs, and build tools;
-# fetches this repo from GitHub; builds it; provisions the database; writes .env.
-#
-# USAGE (on a fresh Ubuntu VM, as a sudo-capable user) — public repo, no token:
+# Shivani — one-command installer for a fresh Ubuntu VM.
+# Detects what's present, installs what's missing (with live status), prints the
+# full config, then links WhatsApp (QR) and leaves her running as a service.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Abhishekxdg/shivani-acred/main/install.sh \
 #     | sudo env OPENROUTER_API_KEY=sk-or-xxx bash
 #
-# You can pass more config the same way (OPERATOR_JIDS=..., etc.), or edit .env
-# after. (A private repo would also take: env GITHUB_TOKEN=xxx.)
+# Extra config can be passed the same way (OPERATOR_JIDS=..., SKIP_LINK=1, etc.)
+# or edited in /opt/cos-agent/.env afterward.
 #
-set -euo pipefail
+set -uo pipefail
 
 # ---- config (override via env) --------------------------------------------
 REPO_URL="${REPO_URL:-https://github.com/Abhishekxdg/shivani-acred.git}"
@@ -22,158 +19,254 @@ APP_DIR="${APP_DIR:-/opt/cos-agent}"
 RUN_USER="${RUN_USER:-cos}"
 PG_DB="${PG_DB:-shivani}"
 PG_USER="${PG_USER:-shivani}"
-PG_PASS="${PG_PASS:-$(openssl rand -hex 16)}"
+PG_PASS="${PG_PASS:-$(openssl rand -hex 16 2>/dev/null || echo changeme$RANDOM)}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+SKIP_LINK="${SKIP_LINK:-0}"
 
-say() { printf '\n\033[1;36m>> %s\033[0m\n' "$*"; }
+# ---- pretty output ---------------------------------------------------------
+B=$'\033[1m'; DIM=$'\033[2m'; G=$'\033[1;32m'; Y=$'\033[1;33m'; R=$'\033[1;31m'; C=$'\033[1;36m'; N=$'\033[0m'
+step() { printf '\n%s▶ %s%s\n' "$C" "$*" "$N"; }
+ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
+add()  { printf '  %s+%s %s\n' "$Y" "$N" "$*"; }
+miss() { printf '  %s•%s %s\n' "$DIM" "$N" "$*"; }
+warn() { printf '  %s! %s%s\n' "$Y" "$*" "$N"; }
+die()  { printf '\n%s✗ %s%s\n' "$R" "$*" "$N" >&2; exit 1; }
 
-if [[ $EUID -ne 0 ]]; then echo "Run with sudo (root)." >&2; exit 1; fi
-
-# ---- 1. system packages ----------------------------------------------------
-say "Installing base packages (git, build tools, curl, openssl)"
+[ "$(id -u)" -eq 0 ] || die "Run with sudo (root)."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y curl ca-certificates gnupg lsb-release git build-essential python3 openssl
 
-# ---- 2. Node.js >= 20 ------------------------------------------------------
 node_major() { node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
 have_node20() { command -v node >/dev/null 2>&1 && [ "$(node_major)" -ge 20 ] 2>/dev/null; }
-if ! have_node20; then
-  say "Installing Node.js 20 (NodeSource)"
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null || true
-  apt-get install -y nodejs 2>/dev/null || true
-fi
-if ! have_node20; then
-  say "NodeSource unavailable for this release — installing the distro Node.js"
-  apt-get install -y nodejs npm || true
-fi
-have_node20 || { echo "ERROR: could not install Node.js >= 20" >&2; exit 1; }
-say "Node $(node -v), npm $(npm -v 2>/dev/null || echo '?')"
+have_pkg() { dpkg -s "$1" >/dev/null 2>&1; }
 
-# ---- 2b. Chromium runtime libraries (for the headless browser web search) --
-say "Installing Chromium runtime libraries"
-CHROME_DEPS="ca-certificates fonts-liberation libatk-bridge2.0-0 libatk1.0-0 \
-libcairo2 libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libgtk-3-0 \
-libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
-libxext6 libxfixes3 libxkbcommon0 libxrandr2 xdg-utils"
-# libasound2 was renamed to libasound2t64 on Ubuntu 24.04 — try both.
-apt-get install -y $CHROME_DEPS libasound2t64 \
-  || apt-get install -y $CHROME_DEPS libasound2 \
-  || apt-get install -y $CHROME_DEPS || true
+printf '%s\n' "${B}================ Shivani installer ================${N}"
+printf '%s\n' "Target: ${APP_DIR}  ·  Ubuntu $(lsb_release -rs 2>/dev/null || echo '?') ($(lsb_release -cs 2>/dev/null || echo '?'))"
 
-# ---- 3. PostgreSQL + pgvector (version-adaptive) --------------------------
-say "Installing PostgreSQL + pgvector"
-CODENAME="$(lsb_release -cs 2>/dev/null || echo '')"
-# Use the official PGDG repo only if it actually has packages for this release;
-# otherwise fall back to the distro's own PostgreSQL (works on brand-new Ubuntu).
-if [ -n "$CODENAME" ] && \
-   curl -fsI "https://apt.postgresql.org/pub/repos/apt/dists/${CODENAME}-pgdg/InRelease" >/dev/null 2>&1; then
-  say "Using PGDG repo for ${CODENAME}"
-  install -d /usr/share/postgresql-common/pgdg
-  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-  echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" \
-    > /etc/apt/sources.list.d/pgdg.list
-  apt-get update -y || true
+# ---- 1. preflight: what's here, what's needed -----------------------------
+step "1/9  Checking what's already installed"
+NEED_BASE=0; NEED_NODE=0; NEED_PG=0; NEED_CHROME=0
+command -v git >/dev/null && command -v gcc >/dev/null && ok "build tools + git" || { miss "build tools + git — will install"; NEED_BASE=1; }
+have_node20 && ok "Node $(node -v)" || { miss "Node >= 20 — will install"; NEED_NODE=1; }
+command -v psql >/dev/null && ok "PostgreSQL $(psql --version 2>/dev/null | grep -oE '[0-9]+' | head -1)" || { miss "PostgreSQL — will install"; NEED_PG=1; }
+have_pkg libnss3 && ok "Chromium runtime libs" || { miss "Chromium libs — will install"; NEED_CHROME=1; }
+[ -d "$APP_DIR/.git" ] && ok "existing checkout at $APP_DIR (will update)" || miss "code — will clone into $APP_DIR"
+
+# ---- 2. base packages ------------------------------------------------------
+step "2/9  Base packages"
+if [ "$NEED_BASE" = 1 ]; then
+  add "installing curl, git, build-essential, python3, openssl…"
+  apt-get update -y >/dev/null 2>&1 || die "apt-get update failed"
+  apt-get install -y curl ca-certificates gnupg lsb-release git build-essential python3 openssl >/dev/null 2>&1 \
+    || die "failed to install base packages"
+  ok "base packages installed"
 else
-  say "No PGDG packages for '${CODENAME:-unknown}' — using the distro PostgreSQL"
+  ok "already present"
 fi
-apt-get install -y postgresql postgresql-contrib
-systemctl enable --now postgresql
 
-# Detect the installed major version, then get pgvector (packaged, else source).
+# ---- 3. Node.js >= 20 ------------------------------------------------------
+step "3/9  Node.js"
+if [ "$NEED_NODE" = 1 ]; then
+  add "installing Node.js 20 via NodeSource…"
+  curl -fsSL https://deb.nodesource.com/setup_20.x 2>/dev/null | bash - >/dev/null 2>&1 || true
+  apt-get install -y nodejs >/dev/null 2>&1 || true
+  have_node20 || { add "NodeSource unavailable — using distro Node.js…"; apt-get install -y nodejs npm >/dev/null 2>&1 || true; }
+  have_node20 || die "could not install Node.js >= 20"
+fi
+ok "Node $(node -v), npm $(npm -v 2>/dev/null || echo '?')"
+
+# ---- 4. Chromium runtime libraries (headless-browser web search) ----------
+step "4/9  Chromium libraries (for real web browsing)"
+if [ "$NEED_CHROME" = 1 ]; then
+  DEPS="ca-certificates fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libcairo2 \
+libcups2 libdbus-1-3 libdrm2 libexpat1 libgbm1 libglib2.0-0 libgtk-3-0 libnspr4 \
+libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
+libxfixes3 libxkbcommon0 libxrandr2 xdg-utils"
+  add "installing Chromium runtime libraries…"
+  apt-get install -y $DEPS libasound2t64 >/dev/null 2>&1 \
+    || apt-get install -y $DEPS libasound2 >/dev/null 2>&1 \
+    || apt-get install -y $DEPS >/dev/null 2>&1 || true
+  ok "Chromium libraries installed"
+else
+  ok "already present"
+fi
+
+# ---- 5. PostgreSQL + pgvector (version-adaptive) --------------------------
+step "5/9  PostgreSQL + pgvector"
+CODENAME="$(lsb_release -cs 2>/dev/null || echo '')"
+if [ "$NEED_PG" = 1 ]; then
+  if [ -n "$CODENAME" ] && curl -fsI "https://apt.postgresql.org/pub/repos/apt/dists/${CODENAME}-pgdg/InRelease" >/dev/null 2>&1; then
+    add "adding PGDG repo for ${CODENAME}…"
+    install -d /usr/share/postgresql-common/pgdg
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc 2>/dev/null
+    echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+    apt-get update -y >/dev/null 2>&1 || true
+  else
+    add "no PGDG for '${CODENAME:-?}' — using the distro PostgreSQL"
+  fi
+  apt-get install -y postgresql postgresql-contrib >/dev/null 2>&1 || die "failed to install PostgreSQL"
+fi
+systemctl enable --now postgresql >/dev/null 2>&1 || true
 PGVER="$(ls -1 /usr/lib/postgresql/ 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)"
 [ -z "$PGVER" ] && PGVER="$(pg_config --version 2>/dev/null | grep -oE '[0-9]+' | head -1)"
-say "PostgreSQL major version: ${PGVER:-unknown}"
-if ! apt-get install -y "postgresql-${PGVER}-pgvector" 2>/dev/null; then
-  say "Building pgvector from source for PG ${PGVER}"
-  apt-get install -y "postgresql-server-dev-${PGVER}" make gcc git
+ok "PostgreSQL ${PGVER:-?} running"
+
+# pgvector: packaged, else build from source
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null | grep -q 1; then
+  ok "pgvector available"
+elif apt-get install -y "postgresql-${PGVER}-pgvector" >/dev/null 2>&1; then
+  ok "pgvector installed (package)"
+else
+  add "building pgvector from source…"
+  apt-get install -y "postgresql-server-dev-${PGVER}" make gcc git >/dev/null 2>&1
   _pv="$(mktemp -d)"
-  git clone --depth 1 https://github.com/pgvector/pgvector.git "$_pv/pgvector"
-  make -C "$_pv/pgvector"
-  make -C "$_pv/pgvector" install
+  git clone --depth 1 https://github.com/pgvector/pgvector.git "$_pv/pgvector" >/dev/null 2>&1 \
+    && make -C "$_pv/pgvector" >/dev/null 2>&1 && make -C "$_pv/pgvector" install >/dev/null 2>&1 \
+    && ok "pgvector built + installed" || warn "pgvector build failed — semantic memory will use keyword fallback"
   rm -rf "$_pv"
 fi
 
-say "Provisioning database $PG_DB"
-sudo -u postgres psql <<SQL
+# provision role + db + extension (idempotent; password kept in sync)
+add "provisioning database '${PG_DB}'…"
+sudo -u postgres psql >/dev/null 2>&1 <<SQL
 DO \$\$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${PG_USER}') THEN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname='${PG_USER}') THEN
+    ALTER ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASS}';
+  ELSE
     CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASS}';
   END IF;
 END \$\$;
-SELECT 'CREATE DATABASE ${PG_DB} OWNER ${PG_USER}'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${PG_DB}')\gexec
+SELECT 'CREATE DATABASE ${PG_DB} OWNER ${PG_USER}' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='${PG_DB}')\gexec
 SQL
-sudo -u postgres psql -d "${PG_DB}" -c "CREATE EXTENSION IF NOT EXISTS vector;"
+sudo -u postgres psql -d "${PG_DB}" -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1 \
+  && ok "database ready (pgvector enabled)" || warn "pgvector extension not enabled (keyword-memory fallback)"
 DATABASE_URL="postgresql://${PG_USER}:${PG_PASS}@localhost:5432/${PG_DB}"
 
-# ---- 4. fetch the code -----------------------------------------------------
+# ---- 6. fetch the code -----------------------------------------------------
+step "6/9  Fetching Shivani"
 CLONE_URL="$REPO_URL"
-if [[ -n "$GITHUB_TOKEN" ]]; then
-  CLONE_URL="${REPO_URL/https:\/\//https://x-access-token:${GITHUB_TOKEN}@}"
-fi
-if [[ -d "$APP_DIR/.git" ]]; then
-  say "Updating existing checkout at $APP_DIR"
-  git -C "$APP_DIR" remote set-url origin "$CLONE_URL"
-  git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH"
-  git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+[ -n "$GITHUB_TOKEN" ] && CLONE_URL="${REPO_URL/https:\/\//https://x-access-token:${GITHUB_TOKEN}@}"
+if [ -d "$APP_DIR/.git" ]; then
+  add "updating existing checkout…"
+  git -C "$APP_DIR" remote set-url origin "$CLONE_URL" 2>/dev/null
+  git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1 && git -C "$APP_DIR" reset --hard "origin/$BRANCH" >/dev/null 2>&1 \
+    || die "git update failed"
 else
-  say "Cloning $REPO_URL into $APP_DIR"
-  git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" "$APP_DIR"
+  add "cloning $REPO_URL…"
+  git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" "$APP_DIR" >/dev/null 2>&1 || die "git clone failed (is the repo public / token valid?)"
 fi
-# Don't leave the token in the stored remote.
-git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null
+ok "code at $APP_DIR ($(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null))"
 
-# ---- 5. build --------------------------------------------------------------
-say "Installing dependencies + building (this downloads Chromium)"
-cd "$APP_DIR"
-# Keep Puppeteer's Chromium inside the app dir so the service user can find it.
+# ---- 7. build --------------------------------------------------------------
+step "7/9  Installing dependencies + building (downloads Chromium ~150MB)"
+cd "$APP_DIR" || die "cannot enter $APP_DIR"
 export PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer"
-npm ci
-npm run build
+add "npm ci…"
+npm ci >/dev/null 2>&1 || npm install >/dev/null 2>&1 || die "npm install failed"
+add "building…"
+npm run build >/dev/null 2>&1 || die "build failed (run 'npm run build' in $APP_DIR to see why)"
+ok "built ($(node -e "import('./dist/agent/tools/index.js').then(m=>console.log(m.tools.length+' tools'))" 2>/dev/null || echo 'ok'))"
 
-# ---- 6. .env ---------------------------------------------------------------
-if [[ ! -f "$APP_DIR/.env" ]]; then
-  say "Creating .env from template"
-  cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-fi
-set_env() { # key value  — set or replace a key in .env
+# ---- 8. .env + ownership ---------------------------------------------------
+step "8/9  Configuration"
+[ -f "$APP_DIR/.env" ] || { cp "$APP_DIR/.env.example" "$APP_DIR/.env"; add "created .env from template"; }
+set_env() {
   local k="$1" v="$2"
-  if grep -q "^${k}=" "$APP_DIR/.env"; then
-    sed -i "s#^${k}=.*#${k}=${v//#/\\#}#" "$APP_DIR/.env"
-  else
-    printf '%s=%s\n' "$k" "$v" >> "$APP_DIR/.env"
-  fi
+  if grep -q "^${k}=" "$APP_DIR/.env"; then sed -i "s#^${k}=.*#${k}=${v}#" "$APP_DIR/.env"; else printf '%s=%s\n' "$k" "$v" >> "$APP_DIR/.env"; fi
 }
 set_env DATABASE_URL "$DATABASE_URL"
 set_env REPO_ROOT "$APP_DIR"
 set_env PUPPETEER_CACHE_DIR "$APP_DIR/.cache/puppeteer"
-[[ -n "${OPENROUTER_API_KEY:-}" ]] && set_env OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
-[[ -n "${OPERATOR_JIDS:-}" ]]      && set_env OPERATOR_JIDS "$OPERATOR_JIDS"
-
-# ---- 7. run user + ownership ----------------------------------------------
+[ -n "${OPENROUTER_API_KEY:-}" ] && set_env OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
+[ -n "${OPERATOR_JIDS:-}" ] && set_env OPERATOR_JIDS "$OPERATOR_JIDS"
 id -u "$RUN_USER" >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin "$RUN_USER"
 chown -R "$RUN_USER":"$RUN_USER" "$APP_DIR"
+ok "configuration written; $APP_DIR owned by $RUN_USER"
 
-cat <<DONE
+# ---- settings summary ------------------------------------------------------
+getenv() { grep -E "^$1=" "$APP_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+KEY="$(getenv OPENROUTER_API_KEY)"
+case "$KEY" in ""|*"..."*|*"YOUR"*|*"REPLACE"*) KEYSTATE="${R}NOT SET — edit $APP_DIR/.env before she can think${N}";; *) KEYSTATE="set (…${KEY: -4})";; esac
+printf '\n%s──────── SETTINGS (full file: %s/.env) ────────%s\n' "$B" "$APP_DIR" "$N"
+printf '  %-16s %s\n' "App dir"       "$APP_DIR"
+printf '  %-16s %s\n' "Repo"          "$REPO_URL"
+printf '  %-16s %s\n' "Node"          "$(node -v)"
+printf '  %-16s %s\n' "PostgreSQL"    "${PGVER:-?}"
+printf '  %-16s %s\n' "Database"      "postgresql://${PG_USER}:********@localhost:5432/${PG_DB}"
+printf '  %-16s %s\n' "Agent"         "$(getenv AGENT_NAME) — $(getenv COMPANY_NAME)"
+printf '  %-16s %s\n' "Model"         "$(getenv OPENROUTER_MODEL)"
+printf '  %-16s %s\n' "OpenRouter key" "$KEYSTATE"
+printf '  %-16s %s\n' "Operator no."  "$(getenv OPERATOR_JIDS)"
+printf '  %-16s %s\n' "Founders"      "$(getenv FOUNDERS)"
+printf '  %-16s %s\n' "Founders group" "$(getenv FOUNDERS_GROUP_JID | sed 's/^$/(not set yet)/')"
+printf '  %-16s %s\n' "Timezone"      "$(getenv TZ)"
+printf '  %-16s %s\n' "Web browsing"  "headless Chromium (no API key)"
+printf '  %-16s %s\n' "Service user"  "$RUN_USER"
+printf '%s────────────────────────────────────────────────%s\n' "$B" "$N"
 
-============================================================================
-✅ Shivani installed at $APP_DIR
-   Database: $DATABASE_URL   (password saved in .env — keep it safe)
+# ---- 9. link WhatsApp + go live -------------------------------------------
+NODE_BIN="$(command -v node)"
+gen_unit() { # $1 unit filename  $2 ExecStart
+  cat > "/etc/systemd/system/$1" <<UNIT
+[Unit]
+Description=Shivani — ACRED AI chief of staff
+After=network-online.target postgresql.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=$RUN_USER
+Group=$RUN_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$2
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PUPPETEER_CACHE_DIR=$APP_DIR/.cache/puppeteer
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+enable_service() {
+  systemctl daemon-reload
+  gen_unit shivani-watchdog.service "$NODE_BIN $APP_DIR/dist/evolve/watchdog.js"
+  systemctl enable --now shivani-watchdog.service >/dev/null 2>&1 || true
+  sleep 4
+  if systemctl is-active --quiet shivani-watchdog.service; then ok "Running as service: shivani-watchdog (self-deploy + auto-rollback)"; return 0; fi
+  warn "watchdog didn't start — falling back to the direct service"
+  systemctl disable --now shivani-watchdog.service >/dev/null 2>&1 || true
+  gen_unit shivani.service "$NODE_BIN $APP_DIR/dist/index.js"
+  systemctl enable --now shivani.service >/dev/null 2>&1 || true
+  sleep 3
+  systemctl is-active --quiet shivani.service && ok "Running as service: shivani (direct)" || warn "service didn't start — check: journalctl -u shivani -n 50"
+}
 
-NEXT STEPS
-1) Set your OpenRouter key (if not passed in):  nano $APP_DIR/.env   (OPENROUTER_API_KEY=...)
-   and confirm OPERATOR_JIDS, FOUNDERS, FOUNDERS_GROUP_JID.
+if [ "$SKIP_LINK" = 1 ]; then
+  step "9/9  WhatsApp link skipped (SKIP_LINK=1)"
+  echo "  Link later: sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm start'  (scan QR)"
+  enable_service
+else
+  step "9/9  Link WhatsApp — scan the QR below (WhatsApp → Linked Devices)"
+  echo "  Waiting up to 4 minutes for you to scan…"
+  LINKLOG="$(mktemp)"
+  ( sudo -u "$RUN_USER" env PUPPETEER_CACHE_DIR="$APP_DIR/.cache/puppeteer" \
+      bash -c "cd '$APP_DIR' && node dist/index.js" 2>&1 | tee "$LINKLOG" ) &
+  CONNECTED=0
+  for _ in $(seq 1 240); do
+    grep -q "WhatsApp connected" "$LINKLOG" 2>/dev/null && { CONNECTED=1; break; }
+    sleep 1
+  done
+  sudo -u "$RUN_USER" pkill -f "dist/index.js" >/dev/null 2>&1 || true
+  wait >/dev/null 2>&1 || true
+  rm -f "$LINKLOG"
+  if [ "$CONNECTED" = 1 ]; then
+    ok "WhatsApp linked ✅"
+    enable_service
+  else
+    warn "QR not scanned in time. Finish with: sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm start' (scan), then re-run this installer."
+  fi
+fi
 
-2) Link WhatsApp — run once interactively to scan the QR:
-      cd $APP_DIR && sudo -u $RUN_USER npm start
-   Scan it in WhatsApp > Linked Devices, wait for "WhatsApp connected", then Ctrl-C.
-
-3) Run it as a supervised service (survives reboots, self-deploy + auto-rollback):
-      sudo cp $APP_DIR/deploy/shivani-watchdog.service /etc/systemd/system/
-      sudo systemctl daemon-reload && sudo systemctl enable --now shivani-watchdog
-      journalctl -u shivani-watchdog -f
-============================================================================
-DONE
+printf '\n%s================ READY TO GO ================%s\n' "$G" "$N"
+echo "Message the VM's WhatsApp from the operator number (${B}$(getenv OPERATOR_JIDS)${N}) — try: !status"
+[ "${KEYSTATE#*NOT SET}" != "$KEYSTATE" ] && echo "${Y}First set a real OPENROUTER_API_KEY in $APP_DIR/.env, then: sudo systemctl restart shivani-watchdog${N}"
+echo "Logs: ${DIM}journalctl -u shivani-watchdog -f${N}   ·   Config: ${DIM}$APP_DIR/.env${N}"
