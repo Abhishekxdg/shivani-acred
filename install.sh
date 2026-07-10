@@ -268,6 +268,26 @@ enable_service() {
   systemctl is-active --quiet shivani.service && ok "Running as service: shivani (direct)" || warn "service didn't start — check: journalctl -u shivani -n 50"
 }
 
+# Stop any already-running service FIRST so only ONE process ever connects to
+# WhatsApp — two concurrent sessions on the same creds get logged out (515/401).
+systemctl stop shivani-watchdog shivani >/dev/null 2>&1 || true
+sleep 1
+
+attempt_link() { # 0 = connected, 2 = logged-out (dead creds), 1 = timeout
+  local log; log="$(mktemp)"; local rc=1
+  ( sudo -u "$RUN_USER" env PUPPETEER_EXECUTABLE_PATH="$CHROME_BIN" \
+      bash -c "cd '$APP_DIR' && node dist/index.js" 2>&1 | tee "$log" ) &
+  for _ in $(seq 1 240); do
+    grep -q "WhatsApp connected" "$log" 2>/dev/null && { rc=0; break; }
+    grep -q "Logged out" "$log" 2>/dev/null && { rc=2; break; }
+    sleep 1
+  done
+  sudo -u "$RUN_USER" pkill -f "dist/index.js" >/dev/null 2>&1 || true
+  wait >/dev/null 2>&1 || true
+  rm -f "$log"
+  return $rc
+}
+
 if [ "$SKIP_LINK" = 1 ]; then
   step "9/9  WhatsApp link skipped (SKIP_LINK=1)"
   echo "  Link later: sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm start'  (scan QR)"
@@ -275,23 +295,15 @@ if [ "$SKIP_LINK" = 1 ]; then
 else
   step "9/9  Link WhatsApp — scan the QR below (WhatsApp → Linked Devices)"
   echo "  Waiting up to 4 minutes for you to scan…"
-  LINKLOG="$(mktemp)"
-  ( sudo -u "$RUN_USER" env PUPPETEER_EXECUTABLE_PATH="$CHROME_BIN" \
-      bash -c "cd '$APP_DIR' && node dist/index.js" 2>&1 | tee "$LINKLOG" ) &
-  CONNECTED=0
-  for _ in $(seq 1 240); do
-    grep -q "WhatsApp connected" "$LINKLOG" 2>/dev/null && { CONNECTED=1; break; }
-    sleep 1
-  done
-  sudo -u "$RUN_USER" pkill -f "dist/index.js" >/dev/null 2>&1 || true
-  wait >/dev/null 2>&1 || true
-  rm -f "$LINKLOG"
-  if [ "$CONNECTED" = 1 ]; then
-    ok "WhatsApp linked ✅"
-    enable_service
-  else
-    warn "QR not scanned in time. Finish with: sudo -u $RUN_USER bash -c 'cd $APP_DIR && npm start' (scan), then re-run this installer."
+  attempt_link; RC=$?
+  if [ "$RC" = 2 ]; then
+    warn "existing session expired/conflicted — clearing it and showing a fresh QR"
+    rm -rf "$APP_DIR/data/wa-auth"
+    attempt_link; RC=$?
   fi
+  sleep 3  # let the link socket fully close before the service reconnects
+  if [ "$RC" = 0 ]; then ok "WhatsApp linked ✅"; enable_service
+  else warn "QR not scanned / link failed — re-run this installer to try again."; fi
 fi
 
 printf '\n%s================ READY TO GO ================%s\n' "$G" "$N"
