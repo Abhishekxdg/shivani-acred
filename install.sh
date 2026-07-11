@@ -161,14 +161,21 @@ DATABASE_URL="postgresql://${PG_USER}:${PG_PASS}@localhost:5432/${PG_DB}"
 step "6/9  Fetching Shivani"
 CLONE_URL="$REPO_URL"
 [ -n "$GITHUB_TOKEN" ] && CLONE_URL="${REPO_URL/https:\/\//https://x-access-token:${GITHUB_TOKEN}@}"
+# The repo is owned by $RUN_USER but git runs as root — allow it (else Git aborts
+# with "detected dubious ownership").
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
+GITLOG=/tmp/shivani-git.log
 if [ -d "$APP_DIR/.git" ]; then
   add "updating existing checkout…"
-  git -C "$APP_DIR" remote set-url origin "$CLONE_URL" 2>/dev/null
-  git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1 && git -C "$APP_DIR" reset --hard "origin/$BRANCH" >/dev/null 2>&1 \
-    || die "git update failed"
+  if ! { git -C "$APP_DIR" remote set-url origin "$CLONE_URL" \
+      && git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH" \
+      && git -C "$APP_DIR" reset --hard "origin/$BRANCH"; } >"$GITLOG" 2>&1; then
+    tail -12 "$GITLOG"; die "git update failed — full log at $GITLOG"
+  fi
 else
   add "cloning $REPO_URL…"
-  git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" "$APP_DIR" >/dev/null 2>&1 || die "git clone failed (is the repo public / token valid?)"
+  git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" "$APP_DIR" >"$GITLOG" 2>&1 \
+    || { tail -12 "$GITLOG"; die "git clone failed (is the repo public / token valid?)"; }
 fi
 git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null
 ok "code at $APP_DIR ($(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null))"
