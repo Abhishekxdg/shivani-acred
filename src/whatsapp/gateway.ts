@@ -2,6 +2,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import type { Boom } from '@hapi/boom';
@@ -48,7 +49,18 @@ export async function startWhatsApp(onMessage: MessageHandler): Promise<void> {
   const { state, saveCreds } = await useMultiFileAuthState(join(config.DATA_DIR, 'wa-auth'));
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({ version, auth: state, logger: waLogger });
+  // A stable device identity + conservative presence/keepalive reduce the
+  // known Baileys "conflict: device_removed" churn (issues #2110/#2203).
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: waLogger,
+    browser: Browsers.ubuntu('Chrome'),
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    keepAliveIntervalMs: 25_000,
+    connectTimeoutMs: 60_000,
+  });
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', (update) => {
@@ -70,7 +82,13 @@ export async function startWhatsApp(onMessage: MessageHandler): Promise<void> {
       }
       if (code === DisconnectReason.connectionReplaced) {
         // Another device took the session; reconnecting would fight it in a loop.
-        logger.error('Connection replaced by another session. Not reconnecting.');
+        logger.error('Connection replaced by another session (another instance is running?). Not reconnecting.');
+        return;
+      }
+      if (code === DisconnectReason.restartRequired) {
+        // 515 right after pairing is expected — reconnect immediately, no backoff.
+        logger.info('Restart required (515) — reconnecting now.');
+        startWhatsApp(onMessage).catch((e) => logger.error(e, 'restart reconnect failed'));
         return;
       }
       const delay = reconnectDelay;
